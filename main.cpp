@@ -501,7 +501,7 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 	char keys[256] = { 0 };
 	char previousKeys[256] = { 0 };
 
-	std::string displayUserName = "かまとぅ"; // 表示用ユーザ名
+	std::string displayUserName = "LE3C_19_ムラタ_トモキ"; // 表示用ユーザ名
 
 	// ixwebsocket 初期化
 	ix::initNetSystem();
