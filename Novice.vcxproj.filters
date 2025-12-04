@@ -104,5 +104,6 @@
       <Filter>KamataEngine\Include</Filter>
     </ClInclude>
     <ClInclude Include="nlohmann\json.hpp" />
+    <ClInclude Include="uuid.h" />
   </ItemGroup>
 </Project>
