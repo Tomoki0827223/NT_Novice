@@ -14,6 +14,10 @@
 
 #include "nlohmann/json.hpp"
 
+#include <unordered_set>
+#define UUID_SYSTEM_GENERATOR
+#include "uuid.h"
+
 #include <Novice.h>
 #ifdef USE_IMGUI
 #include <imgui.h>
@@ -119,9 +123,10 @@ namespace MessageFactory {
 		return jsonObject.dump();
 	}
 
-	// チャットメッセージ生成（Broadcast）
+	// チャットメッセージ生成（Broadcast）- messageId を追加
 	std::string MakeChatMessage(
-		const std::string& topic, const std::string& userName, const std::string& message) {
+		const std::string& topic, const std::string& userName, const std::string& message,
+		const std::string& messageId) {
 		json jsonObject;
 		jsonObject["topic"] = topic;
 		jsonObject["event"] = "broadcast"; // 全員に配信するイベント
@@ -132,6 +137,7 @@ namespace MessageFactory {
 		jsonObject["payload"]["event"] = "chat_message"; // イベント名
 		jsonObject["payload"]["payload"]["user_name"] = userName;
 		jsonObject["payload"]["payload"]["message"] = message;
+		jsonObject["payload"]["payload"]["message_id"] = messageId; // メッセージIDを追加
 
 		return jsonObject.dump();
 	}
@@ -233,17 +239,31 @@ struct ChatEntry {
 	std::string userName;
 	std::string message;
 	std::string timeStr;
+	std::string messageId; // ★追加: メッセージID
 };
 
 class ChatManager {
 public:
-	void AddMessage(const std::string& userName, const std::string& message) {
+	// messageId を受け取るように変更し、重複排除を実装
+	void AddMessage(
+		const std::string& userName, const std::string& message, const std::string& messageId) {
 		std::lock_guard<std::mutex> lock(mutex_);
+
+		// ★重複排除チェック
+		if (!messageId.empty() && seenMessageIds_.count(messageId)) {
+			return; // 既に登録されているIDであれば無視
+		}
+
 		ChatEntry entry;
 		entry.userName = userName;
 		entry.message = message;
 		entry.timeStr = Utils::GetCurrentTimeLocal();
+		entry.messageId = messageId; // IDを保存
 		messages_.push_back(entry);
+
+		if (!messageId.empty()) {
+			seenMessageIds_.insert(messageId); // 新しいIDを登録
+		}
 
 		// 履歴上限（例：50件）
 		if (messages_.size() > 50) {
@@ -254,6 +274,7 @@ public:
 	void Clear() {
 		std::lock_guard<std::mutex> lock(mutex_);
 		messages_.clear();
+		seenMessageIds_.clear(); // IDセットもクリア
 	}
 
 	std::vector<ChatEntry> GetMessages() const {
@@ -264,6 +285,7 @@ public:
 private:
 	mutable std::mutex mutex_;
 	std::vector<ChatEntry> messages_;
+	std::unordered_set<std::string> seenMessageIds_; // ★追加: 重複排除用のセット
 };
 
 // Realtime 接続状態クラス
@@ -416,7 +438,7 @@ namespace PresenceParser {
 		}
 	}
 
-	// チャットメッセージのパース
+	// チャットメッセージのパース - messageId のパースを追加
 	bool ParseChatMessage(const std::string& jsonString, ChatEntry& outEntry) {
 		if (!nlohmann::json::accept(jsonString)) {
 			return false;
@@ -429,9 +451,11 @@ namespace PresenceParser {
 				json payload = parsedJson["payload"];
 				if (payload.value("event", "") == "chat_message" && payload.contains("payload")) {
 					json data = payload["payload"];
-					if (data.contains("user_name") && data.contains("message")) {
+					if (data.contains("user_name") && data.contains("message") &&
+						data.contains("message_id")) { // message_id の存在チェックを追加
 						outEntry.userName = data["user_name"].get<std::string>();
 						outEntry.message = data["message"].get<std::string>();
+						outEntry.messageId = data["message_id"].get<std::string>(); // IDをパース
 						return true;
 					}
 				}
@@ -551,7 +575,7 @@ namespace UI {
 		ImGui::EndChild();
 	}
 
-	// ★★★追加：チャットウィンドウ描画関数 (全角スペースを修正)
+	// チャットウィンドウ描画関数
 	bool DrawChatWindow(const ChatManager& chatManager, char* inputBuf) {
 
 		// チャットログ表示エリア
@@ -559,10 +583,13 @@ namespace UI {
 		auto messages = chatManager.GetMessages();
 
 		for (const auto& msg : messages) {
+			// ★メッセージIDを表示
+			ImGui::TextWrapped("ID: %s", msg.messageId.c_str());
+			ImGui::SameLine();
 			ImGui::TextColored(
 				ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "[%s] %s:", msg.timeStr.c_str(), msg.userName.c_str());
 			ImGui::SameLine();
-			ImGui::TextWrapped("%s", msg.message.c_str()); //スライド7枚目の処理 (全角スペース修正済み)
+			ImGui::TextWrapped("%s", msg.message.c_str());
 		}
 
 		// 自動スクロール（簡易実装）
@@ -599,8 +626,15 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 	ImGuiIO& io = ImGui::GetIO();
 	io.Fonts->Clear(); // 既存フォントクリア
 
+	//ImFont* loadedFont = io.Fonts->AddFontFromFileTTF(
+	//	"C:/Windows/Fonts/meiryo.tc", 18.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
+
+	// C:/Windows/Fonts/msgothic.ttc は多くの場合存在します
 	ImFont* loadedFont = io.Fonts->AddFontFromFileTTF(
-		"C:/Windows/Fonts/meiryo.ttc", 18.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
+		"C:/Windows/Fonts/msgothic.ttc", 18.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
+
+	//ImFont* loadedFont = io.Fonts->AddFontFromFileTTF(
+	//	"C:/Windows/Fonts/yumin.ttc", 18.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
 
 	if (loadedFont == NULL) {
 		OutputDebugStringA("Failed to load Japanese font, using default");
@@ -619,7 +653,7 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 
 	std::string displayUserName = "ムラタ_トモキ"; // 表示用ユーザ名
 
-	// ★★★追加：チャット入力用バッファ
+	// チャット入力用バッファ
 	char chatInputBuf[256] = { 0 };
 
 	// ixwebsocket 初期化
@@ -627,6 +661,9 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 	RealtimeConnectionState connectionState;
 	PresenceManager presenceManager;
 	ChatManager chatManager;
+
+	// UUID システムジェネレータの準備
+	uuids::uuid_system_generator uuid_generator;
 
 	std::unique_ptr<ix::WebSocket> webSocketPtr;
 	uint32_t currentFrame = 0;
@@ -703,17 +740,17 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 					}
 				}
 
-				//★★★スライド6枚目。ここにBroadcast(Chat)受信処理
+				// Broadcast(Chat)受信処理
 				if (
-					// 「broadcastが見つかったか」 &&
-					// 「chat_messageが見つかったか」
 					receivedText.find("broadcast") != std::string::npos &&
 					receivedText.find("chat_message") != std::string::npos
 					) {
 					ChatEntry chatEntry;
 					bool parsed = PresenceParser::ParseChatMessage(receivedText, chatEntry);
 					if (parsed) {
-						chatManager.AddMessage(chatEntry.userName, chatEntry.message);
+						// ★messageId を AddMessage に渡す
+						chatManager.AddMessage(
+							chatEntry.userName, chatEntry.message, chatEntry.messageId);
 					}
 				}
 
@@ -768,7 +805,7 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 		}
 		ImGui::End(); // Status Window End
 
-		//★★★スライド7枚目のif文。新しい「Chat」ウィンドウの追加
+		// 新しい「Chat」ウィンドウの追加
 		if (snapshot.joined) {
 			ImGui::Begin("Chat");
 
@@ -776,11 +813,16 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 			bool sendTriggered = UI::DrawChatWindow(chatManager, chatInputBuf);
 
 			if (sendTriggered) {
-				// ★★★スライド8枚目の処理をここに追加 (チャット送信とローカルでのログ追加)
+				// ★メッセージ送信時にIDを生成して付与
+				auto uuid = uuid_generator();
+				auto messageId = uuids::to_string(uuid);
+
 				std::string chatMessage = MessageFactory::MakeChatMessage(
-					Config::kTopic, displayUserName, chatInputBuf);
+					Config::kTopic, displayUserName, chatInputBuf, messageId); // IDを渡す
 				webSocketPtr->sendText(chatMessage);
-				chatManager.AddMessage(displayUserName, chatInputBuf); // 自信のメッセージを即座に追加
+
+				// 自信のメッセージを即座に追加 (IDも渡す)
+				chatManager.AddMessage(displayUserName, chatInputBuf, messageId);
 
 				// 入力欄クリアとフォーカス維持
 				chatInputBuf[0] = '\0';
