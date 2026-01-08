@@ -45,6 +45,7 @@ namespace Config {
 	const int32_t kHeartbeatIntervalFrames = 180;
 } // namespace Config
 
+
 // ユーティリティ関数群
 namespace Utils {
 	// 簡易 UUID 判定ハイフン位置と全長のみ検査
