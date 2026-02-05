@@ -11,6 +11,8 @@
 #include <string_view>
 #include <vector>
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
 #include "nlohmann/json.hpp"
 
@@ -28,6 +30,7 @@
 #pragma comment(lib, "libssl.lib")
 #pragma comment(lib, "libcrypto.lib")
 #pragma comment(lib, "ixwebsocket.lib")
+#pragma comment(lib, "ws2_32.lib") // これを忘れるとビルドエラーになります
 
 using json = nlohmann::json;
 const char kWindowTitle[] = "LE3C_19_ムラタ_トモキ";
@@ -635,234 +638,75 @@ namespace UI {
 
 // メイン関数：WinMain
 int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
-	// 簡易ウィンドウ初期化（Novice ライブラリ）
+
+	// 1. WinSockの初期化
+	WSADATA wsaData;
+	int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (result != 0) {
+		return 1;
+	}
+
+	// 2. ライブラリの初期化
 	Novice::Initialize(kWindowTitle, 1280, 720);
 
-	// ImGui を使用する場合の日本語フォント読み込み処理
-#ifdef USE_IMGUI
-	ImGuiIO& io = ImGui::GetIO();
-	io.Fonts->Clear(); // 既存フォントクリア
-
-	//ImFont* loadedFont = io.Fonts->AddFontFromFileTTF(
-	//	"C:/Windows/Fonts/meiryo.tc", 18.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
-
-	// C:/Windows/Fonts/msgothic.ttc は多くの場合存在します
-	ImFont* loadedFont = io.Fonts->AddFontFromFileTTF(
-		"C:/Windows/Fonts/msgothic.ttc", 18.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
-
-	//ImFont* loadedFont = io.Fonts->AddFontFromFileTTF(
-	//	"C:/Windows/Fonts/yumin.ttc", 18.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
-
-	if (loadedFont == NULL) {
-		OutputDebugStringA("Failed to load Japanese font, using default");
-		io.Fonts->AddFontDefault();
-		io.Fonts->GetGlyphRangesJapanese(); // 日本語範囲要求
-	}
-	else {
-		OutputDebugStringA("Successfully loaded Japanese font");
+	// 3. ソケットの作成
+	SOCKET clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (clientSocket == INVALID_SOCKET) {
+		WSACleanup();
+		return 1;
 	}
 
-	io.Fonts->Build(); // フォントテクスチャビルド
-#endif
+	// 4. サーバーへ接続
+	sockaddr_in serverAddr;
+	serverAddr.sin_family = AF_INET;
+	serverAddr.sin_port = htons(12345); // 資料に合わせて調整してください
+	inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
 
+	int connectResult = connect(clientSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
+
+	// キー入力用
 	char keys[256] = { 0 };
-	char previousKeys[256] = { 0 };
-
-	std::string displayUserName = "ムラタ_トモキ"; // 表示用ユーザ名
-
-	// チャット入力用バッファ
-	char chatInputBuf[256] = { 0 };
-
-	// ixwebsocket 初期化
-	ix::initNetSystem();
-	RealtimeConnectionState connectionState;
-	PresenceManager presenceManager;
-	ChatManager chatManager;
-
-	// UUID システムジェネレータの準備
-	uuids::uuid_system_generator uuid_generator;
-
-	std::unique_ptr<ix::WebSocket> webSocketPtr;
-	uint32_t currentFrame = 0;
-	bool presenceTrackSent = false; // presence トラック一回送信フラグ
-
-	// StartWebSocket ラムダWebSocket を生成して接続開始
-	auto StartWebSocket = [&]() {
-		// 既存接続が存在する場合はクローズ
-		if (webSocketPtr) {
-			webSocketPtr->close();
-			webSocketPtr.reset();
-		}
-		presenceManager.Clear();
-		chatManager.Clear();
-		presenceTrackSent = false;
-
-		webSocketPtr = std::make_unique<ix::WebSocket>();
-		webSocketPtr->setUrl(Config::kSupabaseUrl);
-
-		// メッセージ受信コールバック登録
-		webSocketPtr->setOnMessageCallback([&](const ix::WebSocketMessagePtr& messagePtr) {
-			if (messagePtr->type == ix::WebSocketMessageType::Open) {
-				OutputDebugStringA("WS OPEN");
-				connectionState.SetStatus(RealtimeConnectionState::Status::Connected);
-				std::string joinMessage =
-					MessageFactory::MakeJoinMessage(Config::kTopic, Config::kUserToken);
-				webSocketPtr->sendText(joinMessage);
-
-			}
-			else if (messagePtr->type == ix::WebSocketMessageType::Message) {
-				std::string receivedText = messagePtr->str;
-
-				bool isPhoenixReply = (receivedText.find("phx_reply") != std::string::npos);
-				bool isStatusOk = (receivedText.find("\"status\":\"ok\"") != std::string::npos);
-
-				if (isPhoenixReply && isStatusOk) {
-					if (receivedText.find("\"ref\":\"1\"") != std::string::npos) {
-						connectionState.SetJoined(true);
-						if (!presenceTrackSent) {
-							std::string presenceMessage = MessageFactory::MakePresenceTrackMessage(
-								Config::kTopic, displayUserName);
-							webSocketPtr->sendText(presenceMessage);
-							presenceTrackSent = true;
-						}
-					}
-					else if (receivedText.find("\"ref\":\"hb\"") != std::string::npos) {
-						connectionState.RecordHeartbeatReceived(static_cast<int32_t>(currentFrame));
-					}
-				}
-
-				if (receivedText.find("presence_state") != std::string::npos) {
-					std::vector<PresenceEntry> parsedEntries;
-					PresenceParser::ParsePresenceState(receivedText, parsedEntries);
-					for (const auto& entry : parsedEntries) {
-						presenceManager.AddUser(
-							entry.uniqueId, entry.userName, static_cast<int32_t>(currentFrame));
-					}
-				}
-
-				if (receivedText.find("presence_diff") != std::string::npos) {
-					std::vector<PresenceEntry> joinEntries;
-					std::vector<PresenceEntry> leaveEntries;
-					bool hasChanges =
-						PresenceParser::ParsePresenceDiff(receivedText, joinEntries, leaveEntries);
-					if (hasChanges) {
-						for (const auto& joinEntry : joinEntries) {
-							presenceManager.AddUser(
-								joinEntry.uniqueId, joinEntry.userName,
-								static_cast<int32_t>(currentFrame));
-						}
-						for (const auto& leaveEntry : leaveEntries) {
-							presenceManager.RemoveUser(leaveEntry.uniqueId, leaveEntry.userName);
-						}
-					}
-				}
-
-				// Broadcast(Chat)受信処理
-				if (
-					receivedText.find("broadcast") != std::string::npos &&
-					receivedText.find("chat_message") != std::string::npos
-					) {
-					ChatEntry chatEntry;
-					bool parsed = PresenceParser::ParseChatMessage(receivedText, chatEntry);
-					if (parsed) {
-						// ★messageId を AddMessage に渡す
-						chatManager.AddMessage(
-							chatEntry.userName, chatEntry.message, chatEntry.messageId);
-					}
-				}
-
-			}
-			else if (messagePtr->type == ix::WebSocketMessageType::Error) {
-				connectionState.SetError(messagePtr->errorInfo.reason);
-
-			}
-			else if (messagePtr->type == ix::WebSocketMessageType::Close) {
-				connectionState.SetStatus(RealtimeConnectionState::Status::Closed);
-			}
-			});
-
-		connectionState.SetStatus(RealtimeConnectionState::Status::Connecting);
-		webSocketPtr->start(); // 非同期接続開始
-		};
+	char preKeys[256] = { 0 };
 
 	// メインループ
 	while (Novice::ProcessMessage() == 0) {
 		Novice::BeginFrame();
-		memcpy(previousKeys, keys, 256);
+
+		memcpy(preKeys, keys, 256);
 		Novice::GetHitKeyStateAll(keys);
-		++currentFrame;
 
-		auto snapshot = connectionState.GetSnapshot();
-
-		// ハートビート送信判定join 済みかつ所定フレーム経過で送信
-		if (webSocketPtr && snapshot.joined) {
-			int32_t frameDifference =
-				static_cast<int32_t>(currentFrame) - snapshot.lastHeartbeatSentFrame;
-			if (frameDifference >= Config::kHeartbeatIntervalFrames) {
-				webSocketPtr->sendText(MessageFactory::MakeHeartbeatMessage());
-				connectionState.RecordHeartbeatSent(static_cast<int32_t>(currentFrame));
-			}
-		}
-
+		// --- ここからImGuiの描画 ---
 #ifdef USE_IMGUI
-		// 元々の「Status」ウィンドウ（Heartbeat, Presence含む）
-		ImGui::Begin("Status");
-		if (ImGui::Button("Connect")) {
-			StartWebSocket();
-		}
-		ImGui::SameLine();
+		ImGui::Begin("Network Status");
 
-		UI::DrawConnectionStatus(snapshot);
-		if (snapshot.status == RealtimeConnectionState::Status::Connected) {
-			UI::DrawJoinStatus(snapshot.joined);
-			// Heartbeat
-			UI::DrawHeartbeatStatus(static_cast<int32_t>(currentFrame), snapshot);
-			// Presence (元のサイズで表示)
-			UI::DrawPresenceInfo(presenceManager);
-		}
-		ImGui::End(); // Status Window End
-
-		// 新しい「Chat」ウィンドウの追加
-		if (snapshot.joined) {
-			ImGui::Begin("Chat");
-
-			// 【変更】戻り値でトリガーを取得
-			bool sendTriggered = UI::DrawChatWindow(chatManager, chatInputBuf);
-
-			if (sendTriggered) {
-				// ★メッセージ送信時にIDを生成して付与
-				auto uuid = uuid_generator();
-				auto messageId = uuids::to_string(uuid);
-
-				std::string chatMessage = MessageFactory::MakeChatMessage(
-					Config::kTopic, displayUserName, chatInputBuf, messageId); // IDを渡す
-				webSocketPtr->sendText(chatMessage);
-
-				// 自信のメッセージを即座に追加 (IDも渡す)
-				chatManager.AddMessage(displayUserName, chatInputBuf, messageId);
-
-				// 入力欄クリアとフォーカス維持
-				chatInputBuf[0] = '\0';
-				ImGui::SetItemDefaultFocus();
-				ImGui::SetKeyboardFocusHere(-1);
+		if (connectResult == SOCKET_ERROR) {
+			ImGui::Text("Status: Connection Failed (%d)", WSAGetLastError());
+			if (ImGui::Button("Retry Connect")) {
+				connectResult = connect(clientSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
 			}
-
-			ImGui::End(); // Chat Window End
+		}
+		else {
+			ImGui::Text("Status: Connected!");
+			ImGui::BulletText("Step 1: WSAStartup Success");
+			ImGui::BulletText("Step 2: Socket Created");
+			ImGui::BulletText("Step 3: Connect Success");
 		}
 
+		ImGui::End();
 #endif
+		// --- ここまでImGuiの描画 ---
 
 		Novice::EndFrame();
-		if (keys[DIK_ESCAPE] && !previousKeys[DIK_ESCAPE]) {
-			break; // ESC で終了
+
+		if (preKeys[DIK_ESCAPE] == 0 && keys[DIK_ESCAPE] != 0) {
+			break;
 		}
 	}
 
-	// 終了処理
-	if (webSocketPtr) {
-		webSocketPtr->close();
-	}
-	ix::uninitNetSystem();
+	// 5. 終了処理
+	closesocket(clientSocket);
+	WSACleanup();
 	Novice::Finalize();
+
 	return 0;
 }
