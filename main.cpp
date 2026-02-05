@@ -544,6 +544,7 @@ namespace UI {
 			colorVector = ImVec4(0.2f, 1.0f, 0.3f, 1.0f);
 		}
 
+
 		ImGui::Separator();
 		ImGui::Text("Heartbeat:");
 		ImGui::SameLine();
